@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+passlib
+argon2-cffi
+python-jose[cryptography]
+email-validator
+python-multipart
+argon2-cffi
+shortuuid
