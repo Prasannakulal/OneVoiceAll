@@ -1,11 +1,14 @@
 const mediasoup = require('mediasoup');
 const WebSocket = require('ws');
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
 
 // --- Configuration ---
 const WS_CONTROL_PORT = 8082; // Port for the control plane
 
 let worker;
-const rooms = new Map(); // Stores { roomId: routerObject }
+const rooms = new Map(); // Stores { roomId: { router, transports: Set, producers: Map(userId->producer), consumers: Map(userId->Set) } }
 
 async function startMediasoup() {
     console.log('Starting Mediasoup worker...');
@@ -25,7 +28,7 @@ async function startMediasoup() {
             { kind: 'video', mimeType: 'video/vp8', clockRate: 90000 },
         ]
     });
-    rooms.set('default-room', router);
+    rooms.set('default-room', { router, transports: new Set(), producers: new Map(), consumers: new Map() });
 
     console.log(`Mediasoup worker and default router are ready!`);
 }
@@ -84,3 +87,96 @@ wss.on('connection', ws => {
 
 console.log(`Control plane listening for commands on ws://localhost:${WS_CONTROL_PORT}`);
 startMediasoup();
+
+// --- Minimal HTTP API for SFU control ---
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+function ensureRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    if (!worker) throw new Error('Worker not ready');
+    const router = worker.createRouter({
+      mediaCodecs: [
+        { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
+        { kind: 'video', mimeType: 'video/vp8', clockRate: 90000 }
+      ]
+    });
+    // Note: router is a promise when not awaited; wrap in async use ideally
+  }
+}
+
+app.get('/rtc/:roomId/rtpCapabilities', async (req, res) => {
+  try {
+    const roomId = req.params.roomId || 'default-room';
+    const entry = rooms.get(roomId) || rooms.get('default-room');
+    const router = entry.router || entry;
+    res.json(router.rtpCapabilities);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/rtc/:roomId/transport', async (req, res) => {
+  try {
+    const roomId = req.params.roomId || 'default-room';
+    const direction = req.body.direction; // 'send' | 'recv'
+    const entry = rooms.get(roomId) || rooms.get('default-room');
+    const router = entry.router || entry;
+    const transport = await router.createWebRtcTransport({
+      listenIps: [{ ip: '0.0.0.0', announcedIp: undefined }],
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true
+    });
+    entry.transports.add(transport);
+    res.json({ id: transport.id, iceParameters: transport.iceParameters, iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters, direction });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/rtc/transport/:id/connect', async (req, res) => {
+  try {
+    const { dtlsParameters } = req.body;
+    for (const entry of rooms.values()) {
+      for (const t of entry.transports) {
+        if (t.id === req.params.id) {
+          await t.connect({ dtlsParameters });
+          return res.json({ connected: true });
+        }
+      }
+    }
+    res.status(404).json({ error: 'transport not found' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/rtc/:roomId/produce', async (req, res) => {
+  try {
+    const { transportId, kind, rtpParameters, userId } = req.body;
+    const roomId = req.params.roomId || 'default-room';
+    const entry = rooms.get(roomId) || rooms.get('default-room');
+    let transport = null;
+    for (const t of entry.transports) if (t.id === transportId) transport = t;
+    if (!transport) return res.status(404).json({ error: 'transport not found' });
+    const producer = await transport.produce({ kind, rtpParameters });
+    entry.producers.set(userId || producer.id, producer);
+    res.json({ id: producer.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/rtc/:roomId/consume', async (req, res) => {
+  try {
+    const { transportId, producerId, rtpCapabilities } = req.body;
+    const roomId = req.params.roomId || 'default-room';
+    const entry = rooms.get(roomId) || rooms.get('default-room');
+    const router = entry.router || entry;
+    if (!router.canConsume({ producerId, rtpCapabilities })) {
+      return res.status(400).json({ error: 'cannot consume' });
+    }
+    let transport = null;
+    for (const t of entry.transports) if (t.id === transportId) transport = t;
+    if (!transport) return res.status(404).json({ error: 'transport not found' });
+    const consumer = await transport.consume({ producerId, rtpCapabilities, paused: false });
+    res.json({ id: consumer.id, kind: consumer.kind, rtpParameters: consumer.rtpParameters, producerId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+const HTTP_PORT = process.env.PORT || 8083;
+app.listen(HTTP_PORT, () => console.log(`Mediasoup HTTP API on http://localhost:${HTTP_PORT}`));
