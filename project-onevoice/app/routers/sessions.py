@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi import APIRouter, Depends, HTTPException, status
 import json
 from sqlalchemy.orm import Session
 from .. import crud, schemas, security, database, models
@@ -16,16 +16,14 @@ def join_session(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(security.get_current_user)
 ):
-    # --- ADD THIS STATUS CHECK ---
     session = crud.get_session_by_id(db, session_id=session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status != 'LIVE':
         raise HTTPException(status_code=400, detail="This session is not live and cannot be joined.")
-    # --- END OF STATUS CHECK ---
 
-    crud.add_participant_to_session(db=db, session_id=session_id, user_id=current_user.id)
-    return {"message": "Successfully joined the session.", "role": "PARTICIPANT"}
+    participant = crud.add_participant_to_session(db=db, session_id=session_id, user_id=current_user.id)
+    return {"message": "Successfully joined the session.", "role": participant.role}
 
 @router.get("/{session_id}", response_model=schemas.SessionDetailOut)
 def get_session_details(
@@ -42,15 +40,16 @@ def get_session_details(
     
     participants_out = []
     for p in active_participants:
+        # ✅ CRITICAL FIX: Include email/identifier in participant data
         participants_out.append({
-            "user_id": p.user.id,
-            "full_name": p.user.full_name,
-            "role": p.role,
-            "join_time": p.join_time,
-            "is_sharing_screen": p.is_sharing_screen
-        })
+    "user_id": p.user.id,
+    "full_name": p.user.full_name,
+    "email": p.user.email,  # ✅ THIS IS CRITICAL
+    "role": p.role,
+    "join_time": p.join_time,
+    "is_sharing_screen": p.is_sharing_screen
+})
 
-    # FIX: Include recording_status, recording_url, and room_id in the response
     return {
         "session_id": session.id, 
         "status": session.status, 
@@ -86,7 +85,6 @@ def end_session_for_all(
     crud.end_session(db, session=session)
     return {"message": "Session has been ended."}
 
-# --- ADD THIS NEW ENDPOINT ---
 @router.post("/{session_id}/cancel", response_model=schemas.Message)
 def cancel_session(
     session_id: uuid.UUID,
@@ -97,7 +95,6 @@ def cancel_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Authorization check: only the host can cancel
     host = crud.get_participant(db, session_id=session_id, user_id=current_user.id)
     if not host or host.role != 'HOST':
         raise HTTPException(status_code=403, detail="Only the host can cancel the session")
@@ -107,11 +104,6 @@ def cancel_session(
 
     crud.cancel_session(db, session=session)
     return {"message": "Session has been cancelled."}
-
-
-# In app/routers/sessions.py
-
-# ... (keep existing router and endpoints) ...
 
 @router.post("/{session_id}/screenshare/start", status_code=status.HTTP_200_OK)
 def start_screenshare(
@@ -125,7 +117,6 @@ def start_screenshare(
 
     crud.start_screen_share(db, session_id=session_id, user_id=current_user.id)
 
-    # Broadcast to everyone in the room over WebSocket
     session = crud.get_session_by_id(db, session_id=session_id)
     if session:
         payload = json.dumps({
@@ -135,7 +126,6 @@ def start_screenshare(
             "user_id": str(current_user.id),
             "full_name": current_user.full_name
         })
-        # Fire-and-forget broadcast; no await in sync route
         try:
             import anyio
             anyio.from_thread.run(manager.broadcast, payload, str(session.room_id), None)
@@ -156,7 +146,6 @@ def stop_screenshare(
 
     crud.stop_screen_share(db, session_id=session_id, user_id=current_user.id)
 
-    # Broadcast to everyone in the room over WebSocket
     session = crud.get_session_by_id(db, session_id=session_id)
     if session:
         payload = json.dumps({
@@ -174,10 +163,6 @@ def stop_screenshare(
 
     return {"message": "Screen share stopped successfully"}
 
-
-# In app/routers/sessions.py
-# ... (keep existing router and other endpoints) ...
-
 @router.post("/{session_id}/recording/start", response_model=schemas.Message)
 def start_session_recording(
     session_id: uuid.UUID,
@@ -188,7 +173,6 @@ def start_session_recording(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Authorization: Only the host can start a recording
     host = crud.get_participant(db, session_id=session_id, user_id=current_user.id)
     if not host or host.role != 'HOST':
         raise HTTPException(status_code=403, detail="Only the host can start a recording")
@@ -206,19 +190,13 @@ def stop_session_recording(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Authorization: Only the host can stop a recording
     host = crud.get_participant(db, session_id=session_id, user_id=current_user.id)
     if not host or host.role != 'HOST':
         raise HTTPException(status_code=403, detail="Only the host can stop a recording")
     
-    # In a real system, you'd get the URL from the recording service (BE2)
-    # For now, we'll use a placeholder.
     placeholder_url = f"https://recordings.example.com/{session.id}.mp4"
     crud.stop_recording(db, session=session, url=placeholder_url)
     return {"message": "Session recording stopped and is available"}
-
-
-# In app/routers/sessions.py
 
 @router.post("/{session_id}/participants/{user_id_to_promote}/promote", response_model=schemas.Message)
 def promote_participant(
@@ -227,26 +205,17 @@ def promote_participant(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(security.get_current_user)
 ):
-    # Authorization check: Ensure the current user is the HOST of this session
     requester_participant = crud.get_participant(db, session_id=session_id, user_id=current_user.id)
     if not requester_participant or requester_participant.role != 'HOST':
         raise HTTPException(status_code=403, detail="Only the host can promote participants")
 
-    # Get the participant to be promoted
     participant_to_promote = crud.get_participant(db, session_id=session_id, user_id=user_id_to_promote)
     if not participant_to_promote:
         raise HTTPException(status_code=404, detail="Participant to promote not found in this session")
 
-    # Update the role
     crud.update_participant_role(db, participant=participant_to_promote, new_role='MODERATOR')
     
     return {"message": "Participant has been promoted to Moderator"}
-
-
-
-# In app/routers/sessions.py
-
-# ... (keep existing router and endpoints) ...
 
 @router.post("/start", response_model=schemas.SessionOut)
 def start_instant_session(
@@ -258,4 +227,3 @@ def start_instant_session(
     """
     session = crud.create_instant_session(db=db, user_id=current_user.id)
     return session
-

@@ -75,10 +75,19 @@ def add_participant_to_session(db: Session, session_id: uuid.UUID, user_id: uuid
     if db_participant:
         return db_participant # Or handle re-joining logic
 
+    # ✅ Check if this is the first participant (should be HOST)
+    existing_participants = db.query(models.SessionParticipant).filter(
+        models.SessionParticipant.session_id == session_id,
+        models.SessionParticipant.leave_time.is_(None)  # Only active participants
+    ).count()
+    
+    # ✅ First participant becomes HOST, others become PARTICIPANT
+    role = 'HOST' if existing_participants == 0 else 'PARTICIPANT'
+
     new_participant = models.SessionParticipant(
         session_id=session_id,
         user_id=user_id,
-        role='PARTICIPANT'
+        role=role
     )
     db.add(new_participant)
     db.commit()
