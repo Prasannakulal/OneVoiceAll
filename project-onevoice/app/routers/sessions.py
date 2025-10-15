@@ -1,7 +1,9 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status, Response
+import json
 from sqlalchemy.orm import Session
 from .. import crud, schemas, security, database, models
+from ..signaling import manager
 
 router = APIRouter(
     prefix="/api/v1/sessions",
@@ -48,13 +50,14 @@ def get_session_details(
             "is_sharing_screen": p.is_sharing_screen
         })
 
-    # FIX: Include recording_status and recording_url in the response
+    # FIX: Include recording_status, recording_url, and room_id in the response
     return {
         "session_id": session.id, 
         "status": session.status, 
         "participants": participants_out,
-        "recording_status": session.recording_status,  # Add this
-        "recording_url": session.recording_url         # Add this
+        "recording_status": session.recording_status,
+        "recording_url": session.recording_url,
+        "room_id": session.room_id
     }
 
 @router.delete("/{session_id}/participants/me", status_code=status.HTTP_200_OK)
@@ -121,6 +124,24 @@ def start_screenshare(
         raise HTTPException(status_code=403, detail="User is not an active participant in this session")
 
     crud.start_screen_share(db, session_id=session_id, user_id=current_user.id)
+
+    # Broadcast to everyone in the room over WebSocket
+    session = crud.get_session_by_id(db, session_id=session_id)
+    if session:
+        payload = json.dumps({
+            "type": "screenshare-started",
+            "session_id": str(session_id),
+            "room_id": str(session.room_id),
+            "user_id": str(current_user.id),
+            "full_name": current_user.full_name
+        })
+        # Fire-and-forget broadcast; no await in sync route
+        try:
+            import anyio
+            anyio.from_thread.run(manager.broadcast, payload, str(session.room_id), None)
+        except Exception:
+            pass
+
     return {"message": "Screen share started successfully"}
 
 @router.post("/{session_id}/screenshare/stop", status_code=status.HTTP_200_OK)
@@ -134,6 +155,23 @@ def stop_screenshare(
         raise HTTPException(status_code=403, detail="User is not currently sharing screen")
 
     crud.stop_screen_share(db, session_id=session_id, user_id=current_user.id)
+
+    # Broadcast to everyone in the room over WebSocket
+    session = crud.get_session_by_id(db, session_id=session_id)
+    if session:
+        payload = json.dumps({
+            "type": "screenshare-stopped",
+            "session_id": str(session_id),
+            "room_id": str(session.room_id),
+            "user_id": str(current_user.id),
+            "full_name": current_user.full_name
+        })
+        try:
+            import anyio
+            anyio.from_thread.run(manager.broadcast, payload, str(session.room_id), None)
+        except Exception:
+            pass
+
     return {"message": "Screen share stopped successfully"}
 
 
@@ -220,3 +258,4 @@ def start_instant_session(
     """
     session = crud.create_instant_session(db=db, user_id=current_user.id)
     return session
+

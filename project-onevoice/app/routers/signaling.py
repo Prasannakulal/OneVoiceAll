@@ -28,9 +28,8 @@ async def websocket_endpoint(
             message = json.loads(data)
             message_type = message.get("type")
 
-            # --- ADD THIS CHAT LOGIC ---
+            # Handle chat messages
             if message_type == "chat-message":
-                # For chat, we broadcast a structured message to everyone else
                 chat_payload = json.dumps({
                     "type": "chat-message",
                     "sender_id": str(user.id),
@@ -38,13 +37,27 @@ async def websocket_endpoint(
                     "text": message.get("text")
                 })
                 await manager.broadcast(chat_payload, room_id, websocket)
-            # --- END OF CHAT LOGIC ---
-
-            # Keep existing logic for WebRTC signaling
+            
+            # Handle screenshare start
+            elif message_type == "screenshare-started":
+                await manager.broadcast(data, room_id, websocket)
+            
+            # Handle screenshare stop
+            elif message_type == "screenshare-stopped":
+                await manager.broadcast(data, room_id, websocket)
+            
+            # Handle WebRTC signaling (offer, answer, ICE candidates)
             elif message_type in ["offer", "answer", "ice-candidate"]:
                 await manager.broadcast(data, room_id, websocket)
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, room_id)
         # Inform others that a user has left
-        await manager.broadcast(f'{{"type": "user_left", "user_id": "{user.id}"}}', room_id, websocket)
+        await manager.broadcast(
+            json.dumps({
+                "type": "user_left", 
+                "user_id": str(user.id)
+            }), 
+            room_id, 
+            websocket
+        )

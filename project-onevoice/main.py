@@ -34,7 +34,8 @@ origins = [
     "http://localhost:5173", # <-- Your Vite frontend
     "http://localhost:3000", # <-- In case you use React/Next.js
     "http://localhost:3001", # <-- Original frontend
-    "http://localhost:3002", # <-- Zynthora AI frontend
+    "http://localhost:3002",
+    "http://localhost:5173/"# <-- Zynthora AI frontend
 ]
 
 
